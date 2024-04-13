@@ -26,4 +26,4 @@ class Parser:
       if ms >= points[index]:
         continue
       return self.lyric_map[points[max(0, index-1)]]
-    return ""
+    return self.lyric_map[points[-1]]

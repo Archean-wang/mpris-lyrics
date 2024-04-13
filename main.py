@@ -4,119 +4,116 @@ from dbus.mainloop.glib import DBusGMainLoop
 DBusGMainLoop(set_as_default=True)
 
 
-import time
 import dbus
 import dbus.service
 from gi.repository import GLib
 from lyric import Parser
 
 
-from mpris import MprisPlayer, MprisMetadata
-from netease import NeteaseSource, Metadata
-from utils import debounce
+from mpris import MprisPlayer
+from sources.netease import NeteaseSource
 
-# 创建一个 D-Bus 实例，连接到会话总线
+
 bus = dbus.SessionBus()
 
-class Lyrics(dbus.service.Object):
+class LyricsService(dbus.service.Object):
     def __init__(self):
         bus_name = dbus.service.BusName('org.archean.lyrics', bus=bus)
         dbus.service.Object.__init__(self, bus_name, '/org/archean/lyrics')
         
         self.source = NeteaseSource()
 
-        self.all_player: [MprisPlayer] = []
+        self.all_player: [MprisPlayer] = {}
         self.currrent_player: MprisPlayer = None
 
-        self.playback_status = 'Stopped'
-
-        self.search_lyrics = []
-        self.lyric = None
+        self.search_results: [str] = []
+        self.lyric: Parser = None
         
-        self.last_position = 0
-        self.last_position_update_time = int(time.time() * 1000 * 1000)
-
-        self.update_metadata = debounce(self.update_metadata_origin, 300)
 
     def find_players(self):
-        all_service = bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus').ListNames()
-        self.all_player = [MprisPlayer(player) for player in all_service if player.startswith('org.mpris.MediaPlayer2.')]
-        if len(self.all_player) > 0:
-            self.set_player(self.all_player[0])
+        all_services = bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus').ListNames()
+        mpris_services = [service for service in all_services if service.startswith('org.mpris.MediaPlayer2.')]
+        if len(mpris_services) > 0:
+            self.all_player = {player: MprisPlayer(player) for player in mpris_services}
+            self.connect_player(mpris_services[0])
 
-    def on_properties_changed(self, interface_name, changed_properties, invalidated_properties):
-        for prop, value in changed_properties.items():
-            if prop == 'PlaybackStatus':
-                self.playback_status = value
-            elif prop == "Metadata":
-                if 'xesam:artist' in value and value['xesam:artist'][0] != '':
-                    self.update_metadata(MprisMetadata(str(value['xesam:title']), [str(i) for i in value['xesam:artist']], str(value['xesam:album'])))
+
+    def add_players(self, name):
+        self.all_player[name] = MprisPlayer(name)
+
+
+    def remove_player(self, name):
+        current_name = self.current_player.name
+        self.next_player()
+        if name == current_name:
+            self.all_player.pop(name)
     
-    def update_metadata_origin(self, metadata):
-        self.search_lyrics = self.source.do_search(Metadata(metadata.title, metadata.artist[0]))
-        select = self.search_lyrics[0]
-        lyric = self.source.do_download(select._downloadinfo)
-        self.lyric = Parser(lyric)
+
+    def connect_player(self, name):
+        self.all_player[name].on_metadata_change = self.search_lyric
+        self.current_player = self.all_player[name]
+        self.search_lyric(self.current_player.metadata)
+
+
+    def disconnect_player(self, name):
+        self.all_player[name].on_metadata_change = None
+        self.lyric = None
+    
+
+    def search_lyric(self, metadata):
+        if metadata.title != '' and metadata.artist != '':
+            self.search_results = self.source.do_search(metadata)
+            lyric_text = self.source.do_download(self.search_results[0].downloadinfo)
+            self.lyric = Parser(lyric_text)
+            
 
     @dbus.service.method('org.archean.lyrics.Lyric', out_signature='s')
     def current_lyric(self):
         if self.lyric is not None:
-            return self.lyric.get_lyric(self.get_position() // 1000)
+            return self.lyric.get_lyric(self.current_player.get_position() // 1000)
         return 'No Lyric.'
 
-    def on_seeked(self, x):
-        self.last_position = x
-        self.last_position_update_time = int(time.time() * 1000 * 1000)
+    @dbus.service.method('org.archean.lyrics.Lyric', out_signature='s')
+    def current_player(self):
+        return self.current_player.name if self.current_player else "No player."
 
-    def get_position(self):
-        now = int(time.time() * 1000 * 1000)
-        if self.playback_status == 'Playing':
-            return self.last_position + now - self.last_position_update_time
-        return self.last_position
+    @dbus.service.method('org.archean.lyrics.Lyric', out_signature='as')
+    def all_player(self):
+        return list(self.all_player.keys())
+
+    @dbus.service.method('org.archean.lyrics.Lyric', out_signature='s')
+    def current_metadata(self):
+        return f"{self.current_player.metadata}"
+
+    @dbus.service.method('org.archean.lyrics.Lyric', out_signature='s')
+    def current_status(self):
+        return f"{self.current_player.playback_status}"
+
 
     @dbus.service.method('org.archean.lyrics.Lyric', out_signature='')
     def next_player(self):
-        if len(self.all_player) > 2:
-            cur = self.all_player.index(self.current_player)
-            self.set_player(self.all_player[(cur + 1) % len(self.all_player)])
-
-    def set_player(self, player):
-        self.current_player = player
-        self.get_metadata()
-        player_proxy = self.current_player.player_proxy
-        
-        player_interface = dbus.Interface(player_proxy, 'org.mpris.MediaPlayer2.Player')
-        property_interface = dbus.Interface(player_proxy, 'org.freedesktop.DBus.Properties')
-        
-        property_interface.connect_to_signal('PropertiesChanged', self.on_properties_changed)
-        player_interface.connect_to_signal('Seeked', self.on_seeked)
-
-    def get_metadata(self):
-        metadata = self.current_player.get_property("Metadata")
-        status = self.current_player.get_property("PlaybackStatus")
-        position = self.current_player.get_property("Position")
-
-        self.playback_status = str(status)
-        self.on_seeked(position)
-        self.update_metadata_origin(MprisMetadata(str(metadata['xesam:title']), [str(i) for i in metadata['xesam:artist']], str(metadata['xesam:album'])))
-
+        if len(self.all_player) > 1:
+            self.disconnect_player(self.current_player.name)
+            names = list(self.all_player.keys())
+            cur = names.index(self.current_player.name)
+            self.connect_player(names[(cur + 1) % len(self.all_player)])
 
 
 if __name__ == "__main__":
-    lyrics = Lyrics()
-    lyrics.find_players()
+
+    service = LyricsService()
+    service.find_players()
 
     def name_owner_changed(name, old_owner, new_owner):
         if name.startswith('org.mpris.MediaPlayer2.'):
-            lyrics.find_players()
             if new_owner:
                 print(f"MPRIS player '{name}' registered.")
+                service.add_players(name)
             else:
                 print(f"MPRIS player '{name}' unregistered.")
+                service.remove_player(name)
 
-    # 监听 NameOwnerChanged 信号
     bus.add_signal_receiver(name_owner_changed, 'NameOwnerChanged', 'org.freedesktop.DBus', 'org.freedesktop.DBus')
 
-    # 进入事件循环
     loop = GLib.MainLoop()
     loop.run()

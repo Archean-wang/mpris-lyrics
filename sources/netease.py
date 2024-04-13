@@ -1,6 +1,8 @@
 import requests
 import json
 
+from .result import SearchResult
+
 
 NETEASE_HOST = 'https://music.163.com'
 NETEASE_SEARCH_URL = '/api/search/get'
@@ -22,8 +24,7 @@ class NeteaseSource():
             keys.append(metadata.artist)
         url = NETEASE_HOST + NETEASE_SEARCH_URL
         urlkey = '+'.join(keys).replace(' ', '+')
-        params = 's=%s&type=1' % urlkey
-
+        params = f's={urlkey}&type=1'
         res = requests.post(url=url, params=params)
         
         if res.status_code < 200 or res.status_code  >= 400:
@@ -72,54 +73,3 @@ class NeteaseSource():
             lyric = parsed['lrc']['lyric']
 
         return lyric
-
-
-
-
-class SearchResult:
-    """ Lyrics that match the metadata to be searched.
-    """
-
-    def __init__(self, sourceid, downloadinfo, title='', artist='', album='', comment=''):
-        """
-
-        Arguments:
-        - `title`: The matched lyric title.
-        - `artist`: The matched lyric artist.
-        - `album`: The matched lyric album.
-        - `downloadinfo`: Some additional data that is needed to download the
-          lyric. Normally this value is the url or ID of the lyric.
-          ``downloadinfo`` MUST be composed with basic types such as numbers,
-          lists, dicts or strings so that it can be converted to D-Bus compatible
-          dict with `to_dict` method.
-        """
-        self._title = title
-        self._artist = artist
-        self._album = album
-        self._comment = comment
-        self._sourceid = sourceid
-        self._downloadinfo = downloadinfo
-
-    def to_dict(self, ):
-        """ Convert the result to a dict so that it can be sent with D-Bus.
-        """
-        return {'title': self._title,
-                'artist': self._artist,
-                'album': self._album,
-                'comment': self._comment,
-                'sourceid': self._sourceid,
-                'downloadinfo': self._downloadinfo}
-
-    def __str__(self):
-        return f"""title: {self._title},
-                artist: {self._artist},
-                album: {self._album},
-                comment: {self._comment},
-                sourceid: {self._sourceid},
-                downloadinfo: {self._downloadinfo}"""
-
-
-class Metadata:
-    def __init__(self, title, artist):
-        self.title = title
-        self.artist = artist
